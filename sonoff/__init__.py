@@ -265,7 +265,6 @@ class Sonoff():
         try_reconnect = True
         while (try_reconnect):
             try_reconnect = ws.run_forever()
-            time.sleep(1)
         _LOGGER.debug("### exit run look for %s", ws)
         print("### exit run loop for", ws)
 
