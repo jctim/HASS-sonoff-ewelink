@@ -47,8 +47,6 @@ async def async_setup(hass, config):
     SCAN_INTERVAL   = config.get(DOMAIN, {}).get(CONF_SCAN_INTERVAL,'')
 
     _LOGGER.debug("Create the main object")
-
-    # hass.data[DOMAIN] = Sonoff(hass, email, password, api_region, grace_period)
     hass.data[DOMAIN] = Sonoff(config)
 
     for component in ['switch', 'sensor']:
@@ -66,7 +64,6 @@ async def async_setup(hass, config):
     return True
 
 class Sonoff():
-    # def __init__(self, hass, email, password, api_region, grace_period):
     def __init__(self, config):
 
         # get username & password from configuration.yaml
@@ -169,6 +166,8 @@ class Sonoff():
 
         self.update_devices() # to get the devices list 
 
+        self._create_ws()
+
     def set_wshost(self):
         r = requests.post('https://%s-disp.coolkit.cc:8080/dispatch/app' % self._api_region, headers=self._headers)
         resp = r.json()
@@ -189,6 +188,7 @@ class Sonoff():
         return grace_status
 
     def update_devices(self):
+        _LOGGER.debug("Updating devices...")
 
         # the login failed, nothing to update
         if not self._wshost:
@@ -242,39 +242,78 @@ class Sonoff():
         # devs = await self.async_get_devices()
         devices = self.update_devices()
 
+    @staticmethod
+    def _ws_on_message(ws, message):
+        _LOGGER.debug("### message %s from %s", message, ws)
+
+    @staticmethod
+    def _ws_on_error(ws, error):
+        _LOGGER.debug("### error %s from %s", error, ws)
+
+    @staticmethod
+    def _ws_on_close(ws):
+        _LOGGER.debug("### closed %s", ws)
+
+    @staticmethod
+    def _ws_on_open(ws):
+        _LOGGER.debug("### open %s", ws)
+    
+    @staticmethod
+    def _run_ws(*args):
+        ws = args[0]
+        _LOGGER.debug("### run loop for %s", ws)
+        try_reconnect = True
+        while (try_reconnect):
+            try_reconnect = ws.run_forever()
+            time.sleep(1)
+        _LOGGER.debug("### exit run look for %s", ws)
+        print("### exit run loop for", ws)
+
+
     def _get_ws(self):
-        """Check if the websocket is setup and connected."""
+        if self._ws is not None:
+            payload = {
+                'action'    : "userOnline",
+                'userAgent' : 'app',
+                'version'   : 6,
+                'nonce'     : gen_nonce(15),
+                'apkVesrion': "1.8",
+                'os'        : 'ios',
+                'at'        : self.get_bearer_token(),
+                'apikey'    : self.get_user_apikey(),
+                'ts'        : str(int(time.time())),
+                'model'     : 'iPhone10,6',
+                'romVersion': '11.1.2',
+                'sequence'  : str(time.time()).replace('.','')
+            }
+
+            self._ws.send(json.dumps(payload))
+        
+        return self._ws
+
+    def _create_ws(self):
+        import websocket
+
+        if self._ws is not None:
+            _LOGGER.debug("closing existing WS %s", self._ws)
+            self._ws.close()
+            self._ws = None
+
+        _LOGGER.debug("creating WS...")
         try:
-            create_connection
-        except:
-            from websocket import create_connection
+            self._ws = websocket.WebSocketApp('wss://{}:8080/api/ws'.format(self._wshost), 
+                        #   timeout = 10,
+                            on_open = Sonoff._ws_on_open,
+                            on_message = Sonoff._ws_on_message,
+                            on_error = Sonoff._ws_on_error,
+                            on_close = Sonoff._ws_on_close)
+            
+            import _thread as thread
+            thread.start_new_thread(Sonoff._run_ws, (self._ws,))
 
-        if self._ws is None:
-            try:
-                self._ws = create_connection(('wss://{}:8080/api/ws'.format(self._wshost)), timeout=10)
-
-                payload = {
-                    'action'    : "userOnline",
-                    'userAgent' : 'app',
-                    'version'   : 6,
-                    'nonce'     : gen_nonce(15),
-                    'apkVesrion': "1.8",
-                    'os'        : 'ios',
-                    'at'        : self.get_bearer_token(),
-                    'apikey'    : self.get_user_apikey(),
-                    'ts'        : str(int(time.time())),
-                    'model'     : 'iPhone10,6',
-                    'romVersion': '11.1.2',
-                    'sequence'  : str(time.time()).replace('.','')
-                }
-
-                self._ws.send(json.dumps(payload))
-                wsresp = self._ws.recv()
-                # _LOGGER.error("open socket: %s", wsresp)
-
-            except (socket.timeout, ConnectionRefusedError, ConnectionResetError):
-                _LOGGER.error('failed to create the websocket')
-                self._ws = None
+        except (socket.timeout, ConnectionRefusedError, ConnectionResetError):
+            _LOGGER.error('failed to create the websocket')
+            self._ws = None
 
         return self._ws
         
@@ -337,13 +376,8 @@ class Sonoff():
         # this key is needed for a shared device
         if device['apikey'] != self.get_user_apikey():
             payload['selfApikey'] = self.get_user_apikey()
-
-        self._ws.send(json.dumps(payload))
-        wsresp = self._ws.recv()
-        # _LOGGER.debug("switch socket: %s", wsresp)
         
-        self._ws.close() # no need to keep websocket open (for now)
-        self._ws = None
+        self._ws.send(json.dumps(payload))
 
         # set also te pseudo-internal state of the device until the real refresh kicks in
         for idx, device in enumerate(self._devices):
@@ -373,6 +407,7 @@ class SonoffDevice(Entity):
         self._deviceid      = device['deviceid']
         self._available     = device['online']
 
+        self._name          = device['name']
         self._attributes    = {
             'device_id'     : self._deviceid
         }
